@@ -46,9 +46,14 @@ function checkEmails() {
             msg.once('end', async () => {
               try {
                 const parsed = await simpleParser(buffer);
+                // 优先使用纯文本，如果没有则使用 HTML（去除标签）
+                const bodyText = parsed.text || 
+                                 (parsed.html ? parsed.html.replace(/<[^>]*>/g, '') : '') || 
+                                 '无正文';
+
                 emails.push({
                   subject: parsed.subject,
-                  text: parsed.text || '',
+                  text: bodyText,
                   date: new Date().toISOString().split('T')[0]
                 });
                 client.addFlags(seqno, 'Seen', () => {});
