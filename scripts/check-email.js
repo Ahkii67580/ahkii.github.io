@@ -30,38 +30,65 @@ function checkEmails() {
       client.openBox('INBOX', false, (err, box) => {
         if (err) return reject(err);
 
-        client.search(['UNSEEN', ['SUBJECT', '[Kindle]']], (err, results) => {
-          if (err || !results || results.length === 0) {
+        // 改为通过 HEADER 模糊匹配 Subject 中包含 Kindle 的邮件，并打印搜索结果以便调试
+        client.search(['UNSEEN', ['HEADER', 'SUBJECT', 'Kindle']], (err, results) => {
+          if (err) {
+            console.error('IMAP search error:', err);
+            client.end();
+            return reject(err);
+          }
+
+          console.log('IMAP search results ids:', results);
+
+          if (!results || results.length === 0) {
             client.end();
             return resolve([]);
           }
 
-          const fetch = client.fetch(results, { bodies: '' });
+          // 请求 struct 以便后续可读到 attributes（包含 uid）
+          const fetch = client.fetch(results, { bodies: '', struct: true });
 
           fetch.on('message', (msg, seqno) => {
             let buffer = '';
             msg.on('body', (stream) => {
               stream.on('data', (chunk) => buffer += chunk);
             });
+
+            // 保存 attributes 以获取 uid
+            msg.once('attributes', (attrs) => {
+              msg._attrs = attrs;
+            });
+
             msg.once('end', async () => {
               try {
                 const parsed = await simpleParser(buffer);
                 // 优先使用纯文本，如果没有则使用 HTML（去除标签）
-                const bodyText = parsed.text || 
-                                 (parsed.html ? parsed.html.replace(/<[^>]*>/g, '') : '') || 
+                const bodyText = parsed.text ||
+                                 (parsed.html ? parsed.html.replace(/<[^>]*>/g, '') : '') ||
                                  '无正文';
+
+                const uid = (msg._attrs && msg._attrs.uid) || seqno;
 
                 emails.push({
                   subject: parsed.subject,
                   text: bodyText,
-                  date: new Date().toISOString().split('T')[0]
+                  date: new Date().toISOString().split('T')[0],
+                  uid
                 });
-                client.addFlags(seqno, 'Seen', () => {});
+
+                console.log(`Parsed email uid=${uid} subject=${parsed.subject}`);
+
+                // 使用标准的 \Seen flag 并打印结果
+                client.addFlags(uid, '\\Seen', (err) => {
+                  if (err) console.error('addFlags error for uid', uid, err);
+                  else console.log('Marked seen uid=', uid);
+                });
+
               } catch (e) { console.error('Parse error:', e); }
             });
           });
 
-          fetch.once('error', reject);
+          fetch.once('error', (e) => { console.error('Fetch error:', e); reject(e); });
           fetch.once('end', () => {
             setTimeout(() => { client.end(); resolve(emails); }, 1000);
           });
@@ -69,7 +96,7 @@ function checkEmails() {
       });
     });
 
-    client.once('error', reject);
+    client.once('error', (err) => { console.error('IMAP client error:', err); reject(err); });
     client.connect();
   });
 }
@@ -84,7 +111,7 @@ function createPost(email) {
 
   const paragraphs = email.text.split('\n\n')
     .filter(p => p.trim())
-    .map(p => `<p>${p.replace(/\n/g, '<br>')}</p>`)
+    .map(p => `<p>${p.replace(/\n/g, '<br>')}</p>`) 
     .join('\n');
 
   const html = `<!DOCTYPE html>
@@ -179,11 +206,25 @@ async function main() {
 
     updateIndex();
 
+    // 更详细地打印 git 操作输出，便于排查 push 是否真的成功
     execSync('git config user.name "Email Bot"');
     execSync('git config user.email "bot@example.com"');
     execSync('git add .');
-    execSync('git commit -m "Add posts from email" || true');
-    execSync('git push');
+
+    try {
+      const commitOut = execSync('git commit -m "Add posts from email"').toString();
+      console.log('git commit output:', commitOut);
+    } catch (e) {
+      console.error('git commit warning (maybe no changes):', e.stdout ? e.stdout.toString() : e.message);
+    }
+
+    try {
+      const pushOut = execSync('git push').toString();
+      console.log('git push output:', pushOut);
+    } catch (e) {
+      console.error('git push failed:', e.stdout ? e.stdout.toString() : e.message);
+      throw e; // 抛出以便外层 catch 处理并终止进程（根据需要你也可以不抛出）
+    }
   } catch (err) {
     console.error('Error:', err);
     process.exit(1);
